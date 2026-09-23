@@ -20,6 +20,49 @@ class VerilogState(TypedDict):
 
 MAX_ATTEMPTS = 3
 
+def get_response_text(message) -> str:
+    """Extract the plain answer text from an LLM response.
+
+    Some Gemini models (when reasoning/thinking is enabled) return
+    `message.content` as a LIST of blocks instead of a plain string, e.g.
+    [{"type": "thinking", "thinking": "..."}, "the real answer text"].
+    This pulls out only the real answer text and discards any thinking
+    blocks, so downstream state/prompts/output never carry raw reasoning.
+    """
+    content = message.content
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                if block.get("type") == "thinking":
+                    continue
+                text = block.get("text") or block.get("content")
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+
+    return str(content).strip()
+
+
+def strip_code_fence(text: str) -> str:
+    """Strip a surrounding ```verilog / ``` markdown code fence, if present,
+    so the final answer is plain Verilog source rather than markdown."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines:
+            lines = lines[1:]  # drop opening ``` or ```verilog
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]  # drop closing ```
+        return "\n".join(lines).strip()
+    return stripped
+
 # --- 2. Initialize Model ---
 # Retrieve the key from the OS environment instead of Colab's userdata
 GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -80,7 +123,7 @@ def developer_node(state: VerilogState) -> dict:
     response = llm_flash.invoke(messages)
 
     return {
-        "generated_code": response.content,
+        "generated_code": get_response_text(response),
         "attempt_count": state.get("attempt_count", 0) + 1,
     }
 
@@ -133,7 +176,7 @@ def critic_node(state: VerilogState) -> dict:
         ("user", user_msg),
     ]
     response = llm_flash.invoke(messages)
-    text = response.content
+    text = get_response_text(response)
 
     status = "REJECT"
     feedback = text
@@ -159,7 +202,7 @@ def route_after_critic(state: VerilogState) -> str:
 
 # --- 6. Finalize Node ---
 def finalize_node(state: VerilogState) -> dict:
-    return {"final_answer": state["generated_code"]}
+    return {"final_answer": strip_code_fence(state["generated_code"])}
 
 # --- 7. Build the LangGraph Workflow ---
 graph_builder = StateGraph(VerilogState)
