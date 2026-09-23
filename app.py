@@ -139,9 +139,20 @@ def developer_node(state: VerilogState) -> dict:
         ("user", user_msg),
     ]
     response = invoke_llm(messages)
+    code = get_response_text(response)
+
+    if not code:
+        # The model returned no usable text even after a retry (e.g. its
+        # reasoning consumed the entire output budget). Fall back to the
+        # previous code if there is one, rather than wiping out a working
+        # answer with an empty string.
+        code = previous_code or (
+            "// ERROR: the model returned no output for this request. "
+            "Please try again."
+        )
 
     return {
-        "generated_code": get_response_text(response),
+        "generated_code": code,
         "attempt_count": state.get("attempt_count", 0) + 1,
     }
 
