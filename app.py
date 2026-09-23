@@ -63,6 +63,22 @@ def strip_code_fence(text: str) -> str:
         return "\n".join(lines).strip()
     return stripped
 
+
+def invoke_llm(messages, max_attempts: int = 2):
+    """Call the LLM and retry if it comes back with no usable answer text.
+
+    This can happen if the model's internal "thinking" consumes the whole
+    output token budget before producing an actual answer, or on a
+    transient empty response from the API. Returns the last response
+    either way (caller should still handle an empty result gracefully).
+    """
+    response = None
+    for _ in range(max_attempts):
+        response = llm_flash.invoke(messages)
+        if get_response_text(response):
+            return response
+    return response
+
 # --- 2. Initialize Model ---
 # Retrieve the key from the OS environment instead of Colab's userdata
 GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -70,7 +86,9 @@ GOOGLE_API_KEY = os.environ.get("GEMINI_API_KEY")
 llm_flash = ChatGoogleGenerativeAI(
     model="gemma-4-31b-it",
     api_key=GOOGLE_API_KEY,
-    temperature=0
+    temperature=0,
+    max_output_tokens=8192,
+    thinking_budget=2048,
 )
 
 # --- 3. Developer / Verilog Generator Agent ---
@@ -120,7 +138,7 @@ def developer_node(state: VerilogState) -> dict:
         ("system", DEVELOPER_SYSTEM_PROMPT),
         ("user", user_msg),
     ]
-    response = llm_flash.invoke(messages)
+    response = invoke_llm(messages)
 
     return {
         "generated_code": get_response_text(response),
@@ -175,8 +193,25 @@ def critic_node(state: VerilogState) -> dict:
         ("system", CRITIC_SYSTEM_PROMPT),
         ("user", user_msg),
     ]
-    response = llm_flash.invoke(messages)
+    response = invoke_llm(messages)
     text = get_response_text(response)
+
+    if not text:
+        # The critic produced no usable text even after a retry (e.g. its
+        # reasoning consumed the entire output budget, or a transient
+        # empty API response). Don't silently pass along a blank review -
+        # reject with clear, generic feedback so the developer still gets
+        # something actionable and the retry loop can proceed sensibly.
+        return {
+            "critic_status": "REJECT",
+            "critic_feedback": (
+                "The review could not be completed because the model "
+                "returned an empty response. Re-generate the Verilog, "
+                "double-checking module ports, clock/reset handling, "
+                "sensitivity lists, and blocking vs. non-blocking "
+                "assignments."
+            ),
+        }
 
     status = "REJECT"
     feedback = text
